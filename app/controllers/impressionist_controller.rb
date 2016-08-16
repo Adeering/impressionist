@@ -3,17 +3,17 @@ require 'digest/sha2'
 module ImpressionistController
   module ClassMethods
     def impressionist(opts={})
-      before_action { |c| c.impressionist_subapp_filter(opts) }
+      before_filter { |c| c.impressionist_subapp_filter(opts[:actions], opts[:unique])}
     end
   end
 
   module InstanceMethods
     def self.included(base)
-      base.before_action :impressionist_app_filter
+      base.before_filter :impressionist_app_filter
     end
 
     def impressionist(obj,message=nil,opts={})
-      if should_count_impression?(opts)
+      unless bypass
         if obj.respond_to?("impressionable?")
           if unique_instance?(obj, opts[:unique])
             obj.impressions.create(associative_create_statement({:message => message}))
@@ -29,11 +29,10 @@ module ImpressionistController
       @impressionist_hash = Digest::SHA2.hexdigest(Time.now.to_f.to_s+rand(10000).to_s)
     end
 
-    def impressionist_subapp_filter(opts = {})
-      if should_count_impression?(opts)
-        actions = opts[:actions]
+    def impressionist_subapp_filter(actions=nil,unique_opts=nil)
+      unless bypass
         actions.collect!{|a|a.to_s} unless actions.blank?
-        if (actions.blank? || actions.include?(action_name)) && unique?(opts[:unique])
+        if (actions.blank? || actions.include?(action_name)) && unique?(unique_opts)
           Impression.create(direct_create_statement)
         end
       end
@@ -50,8 +49,7 @@ module ImpressionistController
         :request_hash => @impressionist_hash,
         :session_hash => session_hash,
         :ip_address => request.remote_ip,
-        :referrer => request.referer,
-        :params => params_hash
+        :referrer => request.referer
         )
     end
 
@@ -61,52 +59,17 @@ module ImpressionistController
       Impressionist::Bots.bot?(request.user_agent)
     end
 
-    def should_count_impression?(opts)
-      !bypass && condition_true?(opts[:if]) && condition_false?(opts[:unless])
-    end
-
-    def condition_true?(condition)
-      condition.present? ? conditional?(condition) : true
-    end
-
-    def condition_false?(condition)
-      condition.present? ? !conditional?(condition) : true
-    end
-
-    def conditional?(condition)
-      condition.is_a?(Symbol) ? self.send(condition) : condition.call
-    end
-
     def unique_instance?(impressionable, unique_opts)
-      return unique_opts.blank? || !impressionable.impressions.where(unique_query(unique_opts, impressionable)).exists?
+      return unique_opts.blank? || !impressionable.impressions.where(unique_query(unique_opts)).exists?
     end
 
     def unique?(unique_opts)
-      return unique_opts.blank? || check_impression?(unique_opts)
+      return unique_opts.blank? || !Impression.where(unique_query(unique_opts)).exists?
     end
 
-    def check_impression?(unique_opts)
-      impressions = Impression.where(unique_query(unique_opts - [:params]))
-      check_unique_impression?(impressions, unique_opts)
-    end
-
-    def check_unique_impression?(impressions, unique_opts)
-      impressions_present = impressions.exists?
-      impressions_present && unique_opts_has_params?(unique_opts) ? check_unique_with_params?(impressions) : !impressions_present
-    end
-
-    def unique_opts_has_params?(unique_opts)
-      unique_opts.include?(:params)
-    end
-
-    def check_unique_with_params?(impressions)
-      request_param = params_hash
-      impressions.detect{|impression| impression.params == request_param }.nil?
-    end
-    
     # creates the query to check for uniqueness
-    def unique_query(unique_opts,impressionable=nil)
-      full_statement = direct_create_statement({},impressionable)
+    def unique_query(unique_opts)
+      full_statement = direct_create_statement
       # reduce the full statement to the params we need for the specified unique options
       unique_opts.reduce({}) do |query, param|
         query[param] = full_statement[param]
@@ -115,10 +78,10 @@ module ImpressionistController
     end
 
     # creates a statment hash that contains default values for creating an impression.
-    def direct_create_statement(query_params={},impressionable=nil)
+    def direct_create_statement(query_params={})
       query_params.reverse_merge!(
         :impressionable_type => controller_name.singularize.camelize,
-        :impressionable_id => impressionable.present? ? impressionable.id : params[:id]
+        :impressionable_id=> params[:id]
         )
       associative_create_statement(query_params)
     end
@@ -130,10 +93,6 @@ module ImpressionistController
       # logger.debug "Encoding: #{str.encoding.inspect}"
       # # request.session_options[:id].encode("ISO-8859-1")
       request.session_options[:id]
-    end
-
-    def params_hash
-      request.params.except(:controller, :action, :id)
     end
 
     #use both @current_user and current_user helper
